@@ -1,0 +1,28 @@
+# Docker Compose configuration for QuantumSafe-XCryptor
+#
+# Roles:
+# - .NET service: Performs AES-256-GCM encryption (and decryption for self-verification)
+# - Python service: Performs decryption only to validate cross-language compatibility
+#
+# Both services mount the same host directory ./shared to /data to exchange:
+# - key.txt (base64 32-byte AES key)
+# - sample.txt (plaintext input)
+# - encrypted.bin (output from .NET encryption)
+# - decrypted*.txt (verification outputs)
+
+services:
+  # .NET service (encryption + decryption)
+  dotnet-service:
+    build: ./dotnet-service # Build using Dockerfile in ./dotnet-service
+    container_name: quantumsafe-dotnet
+    volumes:
+      - ./shared:/data # Shared data volume for keys and IO files
+
+  # Python service (decryption only)
+  python-service:
+    build: ./python-service # Build using Dockerfile in ./python-service
+    container_name: quantumsafe-python
+    volumes:
+      - ./shared:/data # Mount the same shared data volume
+    depends_on:
+      - dotnet-service # Ensure .NET runs first to produce encrypted.bin
