@@ -1,13 +1,55 @@
 /**
- * AES-GCM Decryption Module for React Native
+ * AES-GCM Encryption/Decryption Module for React Native
  * 
- * Provides decryption functionality compatible with Python's cryptography
+ * Provides encryption and decryption functionality compatible with Python's cryptography
  * library and .NET's AesGcm class, demonstrating cross-platform cryptographic
  * interoperability in a mobile environment.
  */
 
 import aes from "react-native-aes-gcm";
 import { Buffer } from "buffer";
+import { randomBytes } from "react-native-randombytes";
+
+/**
+ * Encrypts plaintext using AES-256-GCM.
+ * 
+ * @param {string} plaintext - The plaintext data to encrypt
+ * @param {string} keyBase64 - The base64-encoded 32-byte AES-256 key
+ * @returns {Promise<string>} The encrypted data in base64 format
+ *                            Format: [12-byte nonce][ciphertext][16-byte tag]
+ * 
+ * @example
+ * const plaintext = "Secret message";
+ * const key = "...base64 key...";
+ * const encrypted = await encryptFile(plaintext, key);
+ */
+export async function encryptFile(plaintext, keyBase64) {
+  // Generate a random 12-byte nonce (initialization vector)
+  const iv = await new Promise((resolve, reject) => {
+    randomBytes(12, (err, bytes) => {
+      if (err) reject(err);
+      else resolve(Buffer.from(bytes));
+    });
+  });
+
+  // Perform AES-GCM encryption
+  // react-native-aes-gcm returns { content, tag } where both are base64 strings
+  const { content: ctBase64, tag: tagBase64 } = await aes.encrypt(
+    plaintext,
+    keyBase64,
+    iv.toString("base64")
+  );
+
+  // Convert base64 strings back to Buffers
+  const ct = Buffer.from(ctBase64, "base64");
+  const tag = Buffer.from(tagBase64, "base64");
+
+  // Combine: [nonce][ciphertext][tag] to match .NET and Python format
+  const result = Buffer.concat([iv, ct, tag]);
+
+  // Return as base64 string
+  return result.toString("base64");
+}
 
 /**
  * Decrypts a file encrypted with AES-256-GCM.

@@ -1,37 +1,57 @@
 /**
  * React Native AES-GCM Proof of Concept
  * 
- * This application demonstrates cross-platform AES-256-GCM decryption
- * in a React Native mobile environment. It decrypts a file that was
- * encrypted by the Python service using the shared AES key.
+ * This application demonstrates cross-platform AES-256-GCM encryption and decryption
+ * in a React Native mobile environment. It can both encrypt new data and decrypt
+ * files that were encrypted by the Python or .NET services using the shared AES key.
  */
 
 import React, { useEffect } from "react";
 import { Text, SafeAreaView } from "react-native";
-import { decryptFile } from "./aes";
+import { encryptFile, decryptFile } from "./aes";
 import * as RNFS from "react-native-fs";
 
 export default function App() {
-  // Run the decryption test when the component mounts
+  // Run the encryption/decryption tests when the component mounts
   useEffect(() => {
     /**
-     * Test function that performs the decryption workflow:
+     * Test function that performs the encryption and decryption workflow:
      * 1. Reads the shared AES key
-     * 2. Reads the encrypted file (created by Python service)
-     * 3. Decrypts the file and logs the result
+     * 2. Encrypts a sample message and saves it
+     * 3. Decrypts the encrypted file and logs the result
+     * 4. Optionally decrypts files encrypted by other services
      */
     async function test() {
       // Read the base64-encoded AES-256 key from the shared directory
       const key = await RNFS.readFile("/data/key.txt", "utf8");
-      
-      // Read the encrypted file (nonce + ciphertext + tag) in base64 format
-      const encrypted = await RNFS.readFile("/data/encrypted.bin", "base64");
+      const keyTrimmed = key.trim();
 
-      // Decrypt the file using the shared key
-      const dec = await decryptFile(encrypted, key.trim());
+      // Test Encryption
+      console.log("=== Testing Encryption ===");
+      const plaintext = "Hello from React Native! This message was encrypted using AES-256-GCM.";
       
-      // Log the decrypted plaintext to the console
-      console.log("ReactNative:", dec);
+      // Encrypt the plaintext
+      const encrypted = await encryptFile(plaintext, keyTrimmed);
+      console.log("Encrypted (base64):", encrypted.substring(0, 50) + "...");
+      
+      // Save the encrypted data to a file
+      await RNFS.writeFile("/data/encrypted-reactnative.bin", encrypted, "base64");
+      console.log("Saved encrypted file to /data/encrypted-reactnative.bin");
+
+      // Test Decryption of our own encrypted data
+      console.log("\n=== Testing Decryption (own data) ===");
+      const decrypted = await decryptFile(encrypted, keyTrimmed);
+      console.log("Decrypted:", decrypted);
+
+      // Test Decryption of file encrypted by Python/dotnet service
+      try {
+        console.log("\n=== Testing Decryption (from Python/dotnet) ===");
+        const encryptedFromOther = await RNFS.readFile("/data/encrypted.bin", "base64");
+        const decryptedFromOther = await decryptFile(encryptedFromOther, keyTrimmed);
+        console.log("Decrypted from Python/dotnet:", decryptedFromOther);
+      } catch (error) {
+        console.log("Could not decrypt external file (may not exist yet):", error.message);
+      }
     }
 
     // Execute the test
@@ -41,6 +61,7 @@ export default function App() {
   return (
     <SafeAreaView>
       <Text>React Native AES-GCM POC</Text>
+      <Text>Check console for encryption/decryption results</Text>
     </SafeAreaView>
   );
 }
