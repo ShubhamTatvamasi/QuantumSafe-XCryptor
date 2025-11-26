@@ -1,28 +1,32 @@
 # Docker Compose configuration for QuantumSafe-XCryptor
 #
+# Post-Quantum Hybrid Encryption System
+# Demonstrates Kyber1024 + AES-256-GCM across .NET and Python
+#
 # Roles:
-# - .NET service: Performs AES-256-GCM encryption (and decryption for self-verification)
-# - Python service: Performs decryption only to validate cross-language compatibility
+# - .NET service: Generates Kyber1024 keypair, performs hybrid encryption and decryption
+# - Python service: Performs hybrid decryption to validate cross-language PQ compatibility
 #
 # Both services mount the same host directory ./shared to /data to exchange:
-# - key.txt (base64 32-byte AES key)
+# - kyber_public.key / kyber_private.key (Kyber1024 keypairs)
+# - kyber_ciphertext.bin (encapsulated shared secret)
 # - sample.txt (plaintext input)
-# - encrypted.bin (output from .NET encryption)
+# - encrypted.bin (hybrid encrypted output)
 # - decrypted*.txt (verification outputs)
 
 services:
-  # .NET service (encryption + decryption)
+  # .NET service (Kyber1024 key generation + hybrid encryption + decryption)
   dotnet-service:
     build: ./dotnet-service # Build using Dockerfile in ./dotnet-service
     container_name: quantumsafe-dotnet
     volumes:
       - ./shared:/data # Shared data volume for keys and IO files
 
-  # Python service (decryption only)
+  # Python service (hybrid decryption using Kyber1024)
   python-service:
     build: ./python-service # Build using Dockerfile in ./python-service
     container_name: quantumsafe-python
     volumes:
       - ./shared:/data # Mount the same shared data volume
     depends_on:
-      - dotnet-service # Ensure .NET runs first to produce encrypted.bin
+      - dotnet-service # Ensure .NET runs first to generate Kyber keys and encrypt

@@ -1,7 +1,7 @@
 {
   "name": "quantumsafe-xcryptor-react-native",
   "version": "1.0.0",
-  "description": "React Native AES-GCM encryption/decryption proof of concept",
+  "description": "React Native post-quantum hybrid encryption proof of concept using Kyber1024 + AES-256-GCM",
   "main": "App.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -12,14 +12,20 @@
     "react-native-aes-gcm": "^1.0.0",
     "react-native-fs": "^2.20.0",
     "react-native-randombytes": "^3.6.1",
-    "buffer": "^6.0.3"
+    "buffer": "^6.0.3",
+    "crypto-browserify": "^3.12.0",
+    "@noble/post-quantum": "^0.2.0"
   },
   "keywords": [
+    "kyber",
+    "kyber1024",
+    "post-quantum",
     "aes-gcm",
     "encryption",
     "decryption",
     "react-native",
-    "cross-platform"
+    "cross-platform",
+    "quantum-resistant"
   ],
   "author": "",
   "license": "MIT"

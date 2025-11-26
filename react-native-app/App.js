@@ -1,67 +1,266 @@
 /**
- * React Native AES-GCM Proof of Concept
+ * React Native Post-Quantum Hybrid Encryption Proof of Concept
  * 
- * This application demonstrates cross-platform AES-256-GCM encryption and decryption
- * in a React Native mobile environment. It can both encrypt new data and decrypt
- * files that were encrypted by the Python or .NET services using the shared AES key.
+ * This application demonstrates post-quantum secure encryption using Kyber1024 KEM
+ * combined with AES-256-GCM in a React Native mobile environment. It demonstrates
+ * decryption of files encrypted by the .NET or Python services.
+ * 
+ * Hybrid Encryption Scheme:
+ * 1. Kyber1024 provides quantum-resistant key encapsulation
+ * 2. Shared secret is derived into AES-256 key using HKDF
+ * 3. Data is encrypted with AES-256-GCM
+ * 4. Result: [kyber_ciphertext_length][kyber_ciphertext][aes_encrypted_data]
  */
 
-import React, { useEffect } from "react";
-import { Text, SafeAreaView } from "react-native";
+import React, { useEffect, useState } from "react";
+import { Text, SafeAreaView, ScrollView, StyleSheet } from "react-native";
 import { encryptFile, decryptFile } from "./aes";
+import {
+  deriveAesKey,
+  loadSharedKyberData,
+  KYBER_CIPHERTEXT_BYTES,
+  isNativeKyberAvailable,
+  encapsulate,
+  decapsulate,
+} from "./kyber";
 import * as RNFS from "react-native-fs";
+import { Buffer } from "buffer";
 
 export default function App() {
-  // Run the encryption/decryption tests when the component mounts
+  const [status, setStatus] = useState("Initializing...");
+  const [logs, setLogs] = useState([]);
+
+  const addLog = (message) => {
+    console.log(message);
+    setLogs(prev => [...prev, message]);
+  };
+
   useEffect(() => {
     /**
-     * Test function that performs the encryption and decryption workflow:
-     * 1. Reads the shared AES key
-     * 2. Encrypts a sample message and saves it
-     * 3. Decrypts the encrypted file and logs the result
-     * 4. Optionally decrypts files encrypted by other services
+     * Main entry point: check Kyber availability and run appropriate workflow.
      */
-    async function test() {
-      // Read the base64-encoded AES-256 key from the shared directory
-      const key = await RNFS.readFile("/data/key.txt", "utf8");
-      const keyTrimmed = key.trim();
-
-      // Test Encryption
-      console.log("=== Testing Encryption ===");
-      const plaintext = "Hello from React Native! This message was encrypted using AES-256-GCM.";
+    async function runTests() {
+      addLog("=== React Native: Post-Quantum Hybrid Crypto Demo ===");
+      const hasNative = isNativeKyberAvailable();
+      addLog(hasNative ? "✓ Native Kyber module detected!" : "⚠ Native Kyber module not available.");
       
-      // Encrypt the plaintext
-      const encrypted = await encryptFile(plaintext, keyTrimmed);
-      console.log("Encrypted (base64):", encrypted.substring(0, 50) + "...");
-      
-      // Save the encrypted data to a file
-      await RNFS.writeFile("/data/encrypted-reactnative.bin", encrypted, "base64");
-      console.log("Saved encrypted file to /data/encrypted-reactnative.bin");
+      if (hasNative) {
+        await testFullEncryptionWorkflow();
+      } else {
+        addLog("Falling back to decryption using shared keys from .NET/Python.");
+        await testHybridDecryption();
+      }
+    }
 
-      // Test Decryption of our own encrypted data
-      console.log("\n=== Testing Decryption (own data) ===");
-      const decrypted = await decryptFile(encrypted, keyTrimmed);
-      console.log("Decrypted:", decrypted);
-
-      // Test Decryption of file encrypted by Python/dotnet service
+    /**
+     * Full encryption workflow using native Kyber (if available).
+     */
+    async function testFullEncryptionWorkflow() {
       try {
-        console.log("\n=== Testing Decryption (from Python/dotnet) ===");
-        const encryptedFromOther = await RNFS.readFile("/data/encrypted.bin", "base64");
-        const decryptedFromOther = await decryptFile(encryptedFromOther, keyTrimmed);
-        console.log("Decrypted from Python/dotnet:", decryptedFromOther);
+        setStatus("Testing full encryption...");
+        addLog("\n--- Full Hybrid Encryption Workflow ---");
+        
+        // Load public key from .NET
+        const publicKeyB64 = await RNFS.readFile("/data/kyber_public.key", "base64");
+        const publicKey = Buffer.from(publicKeyB64, "base64");
+        addLog(`✓ Loaded public key (${publicKey.length} bytes)`);
+        
+        // Encapsulate to generate ciphertext and shared secret
+        const { ciphertext, sharedSecret } = await encapsulate(publicKey);
+        addLog(`✓ Encapsulated: ciphertext ${ciphertext.length} bytes, secret ${sharedSecret.length} bytes`);
+        
+        // Derive AES key
+        const aesKey = await deriveAesKey(sharedSecret);
+        addLog(`✓ Derived AES-256 key (${aesKey.length} bytes)`);
+        
+        // Encrypt plaintext
+        const plaintext = "Hello from React Native (full encryption)!";
+        const aesEncrypted = await encryptFile(plaintext, aesKey.toString("base64"));
+        addLog(`✓ Encrypted plaintext with AES-GCM`);
+        
+        // Combine into hybrid format: [length][kyber_ct][aes_data]
+        const lenBuf = Buffer.alloc(4);
+        lenBuf.writeUInt32LE(ciphertext.length, 0);
+        const fullEncrypted = Buffer.concat([
+          lenBuf,
+          ciphertext,
+          Buffer.from(aesEncrypted, "base64"),
+        ]);
+        
+        // Save encrypted file
+        await RNFS.writeFile("/data/encrypted-reactnative.bin", fullEncrypted.toString("base64"), "base64");
+        addLog("✓ Saved /data/encrypted-reactnative.bin");
+        
+        setStatus("✓ Encryption complete, now testing decryption...");
+        await testHybridDecryption();
       } catch (error) {
-        console.log("Could not decrypt external file (may not exist yet):", error.message);
+        addLog(`✗ Encryption failed: ${error.message}`);
+        setStatus("✗ Encryption failed");
+      }
+    }
+
+    /**
+     * Test function that performs post-quantum hybrid decryption:
+     * 1. Loads Kyber1024 keys and ciphertext from shared directory
+     * 2. Decapsulates shared secret using Kyber private key
+     * 3. Derives AES-256 key from shared secret
+     * 4. Decrypts AES-GCM encrypted data
+     */
+    async function testHybridDecryption() {
+      try {
+        setStatus("Loading Kyber keys...");
+        addLog("\n--- Hybrid Decryption Workflow ---");
+        
+        // Load Kyber keys and data generated by .NET service
+        let kyberData;
+        try {
+          kyberData = await loadSharedKyberData(RNFS);
+          addLog(`✓ Loaded Kyber public key (${kyberData.publicKey.length} bytes)`);
+          addLog(`✓ Loaded Kyber private key (${kyberData.privateKey.length} bytes)`);
+          addLog(`✓ Loaded Kyber ciphertext (${kyberData.kyberCiphertext.length} bytes)`);
+        } catch (error) {
+          addLog(`⚠ Could not load Kyber keys: ${error.message}`);
+          addLog("Please run the .NET service first to generate Kyber keys.");
+          setStatus("Waiting for .NET service to generate keys...");
+          return;
+        }
+
+        // Read the hybrid encrypted file
+        setStatus("Reading encrypted file...");
+        let fullEncrypted;
+        try {
+          fullEncrypted = await RNFS.readFile("/data/encrypted.bin", "base64");
+          fullEncrypted = Buffer.from(fullEncrypted, "base64");
+          addLog(`✓ Read encrypted file (${fullEncrypted.length} bytes)`);
+        } catch (error) {
+          addLog(`⚠ Could not read encrypted file: ${error.message}`);
+          setStatus("Waiting for encrypted file...");
+          return;
+        }
+
+        // Extract Kyber ciphertext length (first 4 bytes, little-endian)
+        const kyberCtLen = fullEncrypted.readUInt32LE(0);
+        addLog(`Kyber ciphertext length: ${kyberCtLen} bytes`);
+
+        // Extract Kyber ciphertext and AES encrypted data
+        const kyberCiphertext = fullEncrypted.slice(4, 4 + kyberCtLen);
+        const aesEncrypted = fullEncrypted.slice(4 + kyberCtLen);
+        
+        addLog(`Extracted Kyber ciphertext: ${kyberCiphertext.length} bytes`);
+        addLog(`Extracted AES encrypted data: ${aesEncrypted.length} bytes`);
+
+        // Attempt decapsulation if native Kyber is available
+        let aesKey;
+        if (isNativeKyberAvailable()) {
+          try {
+            setStatus("Decapsulating with native Kyber...");
+            const sharedSecret = await decapsulate(kyberData.privateKey, kyberCiphertext);
+            addLog(`✓ Decapsulated shared secret (${sharedSecret.length} bytes)`);
+            
+            aesKey = await deriveAesKey(sharedSecret);
+            addLog("✓ Derived AES-256 key from shared secret");
+          } catch (error) {
+            addLog(`⚠ Native decapsulation failed: ${error.message}`);
+            addLog("Falling back to legacy key...");
+            aesKey = null;
+          }
+        }
+        
+        // Fallback to legacy key if needed
+        if (!aesKey) {
+          addLog("\n⚠ NOTE: Using legacy AES key (native Kyber unavailable or failed).");
+          addLog("For full PQ security, implement native Kyber module.\n");
+          try {
+            const legacyKey = await RNFS.readFile("/data/key.txt", "utf8");
+            aesKey = Buffer.from(legacyKey.trim(), "base64");
+            addLog("Using legacy AES key for decryption");
+          } catch (error) {
+            addLog(`✗ Could not read legacy key: ${error.message}`);
+            setStatus("✗ Decryption failed");
+            return;
+          }
+        }
+
+        // Decrypt AES-GCM data
+        setStatus("Decrypting AES-GCM data...");
+        const decrypted = await decryptFile(
+          aesEncrypted.toString("base64"),
+          aesKey.toString("base64")
+        );
+
+        addLog(`\n✓ Successfully decrypted!`);
+        addLog(`Plaintext: ${decrypted}`);
+        
+        // Save decrypted output
+        await RNFS.writeFile("/data/decrypted-reactnative.txt", decrypted, "utf8");
+        addLog("✓ Saved to /data/decrypted-reactnative.txt");
+
+        setStatus("✓ Decryption successful!");
+      } catch (error) {
+        addLog(`✗ Error: ${error.message}`);
+        console.error(error);
+        setStatus("✗ Error occurred");
       }
     }
 
     // Execute the test
-    test();
-  }, []); // Empty dependency array ensures this runs only once on mount
+    runTests();
+  }, []);
 
   return (
-    <SafeAreaView>
-      <Text>React Native AES-GCM POC</Text>
-      <Text>Check console for encryption/decryption results</Text>
+    <SafeAreaView style={styles.container}>
+      <ScrollView style={styles.scrollView}>
+        <Text style={styles.title}>React Native Post-Quantum Crypto POC</Text>
+        <Text style={styles.subtitle}>Kyber1024 + AES-256-GCM</Text>
+        <Text style={styles.status}>{status}</Text>
+        
+        <Text style={styles.logTitle}>Console Output:</Text>
+        {logs.map((log, index) => (
+          <Text key={index} style={styles.log}>
+            {log}
+          </Text>
+        ))}
+      </ScrollView>
     </SafeAreaView>
   );
 }
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#1a1a1a',
+  },
+  scrollView: {
+    flex: 1,
+    padding: 20,
+  },
+  title: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#00ff00',
+    marginBottom: 5,
+  },
+  subtitle: {
+    fontSize: 14,
+    color: '#00cc00',
+    marginBottom: 15,
+  },
+  status: {
+    fontSize: 16,
+    color: '#ffff00',
+    marginBottom: 20,
+    fontWeight: 'bold',
+  },
+  logTitle: {
+    fontSize: 14,
+    color: '#ffffff',
+    marginBottom: 10,
+    fontWeight: 'bold',
+  },
+  log: {
+    fontSize: 12,
+    color: '#cccccc',
+    marginBottom: 5,
+    fontFamily: 'monospace',
+  },
+});
