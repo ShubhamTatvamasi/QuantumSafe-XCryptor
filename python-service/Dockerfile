@@ -28,8 +28,10 @@ RUN git clone --depth=1 --branch=0.15.0 https://github.com/open-quantum-safe/lib
 # Update library cache
 RUN ldconfig
 
-# Ensure Python can locate the liboqs shared library
-ENV LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH}
+# Ensure Python can locate the liboqs shared library.
+# Note: Docker ENV does not expand existing variables reliably in this context,
+# so we set LD_LIBRARY_PATH explicitly. If you need to append later, use a RUN export.
+ENV LD_LIBRARY_PATH=/usr/local/lib
 ENV OQS_LIB=/usr/local/lib/liboqs.so
 
 # Set working directory inside the container
