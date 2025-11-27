@@ -17,7 +17,6 @@ Decryption Flow:
 
 import base64
 import warnings
-import hashlib
 import struct
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
