@@ -103,32 +103,30 @@ def decrypt_hybrid():
     print(f"Python: Kyber ciphertext size: {len(kyber_ciphertext)} bytes")
     print(f"Python: AES encrypted size: {len(aes_encrypted)} bytes")
     
-    # Decapsulate using liboqs
+    # Decapsulate using liboqs (ciphertext + private key are BOTH required for recovering the shared secret).
+    # Earlier bug: aes_key was only derived in the TypeError branch; if the first attempt succeeded
+    # we never derived aes_key, causing an UnboundLocalError later. This is now fixed.
     if KYBER_AVAILABLE:
         try:
-            # Create KEM instance for Kyber1024 with secret key loaded
-            # Some versions may require both secret_key and public_key
+            # Attempt constructor with both secret_key and public_key (newer liboqs-python versions may allow this).
             try:
                 with oqs.KeyEncapsulation("Kyber1024", secret_key=private_key, public_key=public_key) as kem:
                     shared_secret = kem.decap_secret(kyber_ciphertext)
             except TypeError:
-                # Fallback to secret_key only if public_key arg unsupported
+                # Fallback: constructor only supports secret_key parameter.
                 with oqs.KeyEncapsulation("Kyber1024", secret_key=private_key) as kem:
-                # Decapsulate the shared secret
                     shared_secret = kem.decap_secret(kyber_ciphertext)
-                print(f"Python: Shared secret recovered using liboqs ({len(shared_secret)} bytes)")
-                
-                # Derive AES-256 key from shared secret
-                aes_key = derive_aes_key(shared_secret)
-                print("Python: AES key derived from Kyber shared secret")
+            print(f"Python: Shared secret recovered using liboqs ({len(shared_secret)} bytes)")
+            # Always derive AES key here (unified path)
+            aes_key = derive_aes_key(shared_secret)
+            print("Python: AES key derived from Kyber shared secret")
         except Exception as e:
             print(f"Python: Kyber decapsulation failed: {e}")
             print("Python: Falling back to legacy key...")
-            # Fall back to legacy key
             with open("/data/key.txt", "r") as f:
                 legacy_key_b64 = f.read().strip()
                 aes_key = base64.b64decode(legacy_key_b64)
-                print("Python: Using legacy AES key")
+            print("Python: Using legacy AES key")
     else:
         # Fall back to legacy key if liboqs not available
         try:
