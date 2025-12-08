@@ -1,117 +1,292 @@
 /*
- * Post-Quantum Hybrid Encryption Service (.NET)
+ * QuantumSafe-XCryptor - .NET Desktop Client
  * 
- * This program demonstrates post-quantum secure encryption using Kyber1024 KEM
- * combined with AES-256-GCM. The Kyber1024 algorithm provides quantum-resistant
- * key encapsulation, while AES-GCM handles the actual data encryption.
+ * Post-quantum hybrid encryption client using ML-KEM-1024 + AES-256-GCM.
  * 
- * Encryption Flow:
- * 1. Generate Kyber1024 keypair (or load existing)
- * 2. Encapsulate a shared secret using recipient's public key
- * 3. Derive AES-256 key from shared secret
- * 4. Encrypt data with AES-256-GCM using derived key
- * 5. Store: [kyber_ciphertext][aes_encrypted_data]
+ * Architecture:
+ * - Downloads server's ML-KEM-1024 public key
+ * - Encapsulates shared secret using server's public key
+ * - Derives AES-256 key using HKDF-SHA256 (identical to server)
+ * - Encrypts file locally (zero-knowledge upload)
+ * - Uploads encrypted packet to server: [Kyber CT][AES encrypted data]
+ * 
+ * HKDF Parameters (MUST match server and React Native):
+ * - Salt: 32 zero bytes
+ * - Info: "AES-256-GCM"
+ * - Hash: SHA-256
+ * - Output: 32 bytes (AES-256 key)
  */
 
 using System;
 using System.IO;
+using System.Net.Http;
 using System.Security.Cryptography;
+using System.Threading.Tasks;
+using System.Text;
 
 class Program
 {
-    static void Main()
+    // Configuration
+    private const string SERVER_URL = "http://python-service:5000";
+    private const string SHARED_DIR = "/data";
+    
+    // ML-KEM Constants
+    private const int KYBER_PUBLIC_KEY_SIZE = 1568;
+    private const int KYBER_CIPHERTEXT_SIZE = 1568;
+    private const int KYBER_SHARED_SECRET_SIZE = 32;
+    
+    // HKDF Parameters (MUST be identical across all platforms)
+    private static readonly byte[] HKDF_SALT = new byte[32];  // 32 zero bytes
+    private static readonly byte[] HKDF_INFO = Encoding.UTF8.GetBytes("AES-256-GCM");
+    private const int HKDF_OUTPUT_LENGTH = 32;
+
+    static async Task Main()
     {
-        // Path to the shared data directory
-        string sharedDir = "/data";
+        Console.WriteLine("=".PadRight(60, '='));
+        Console.WriteLine("  QuantumSafe-XCryptor - .NET Desktop Client");
+        Console.WriteLine("=".PadRight(60, '=') + "\n");
 
-        // Define file paths
-        string plainPath = $"{sharedDir}/sample.txt";
-        string encPath = $"{sharedDir}/encrypted.bin";
-        string decPath = $"{sharedDir}/decrypted-dotnet.txt";
-        
-        // Kyber key paths
-        string publicKeyPath = $"{sharedDir}/kyber_public.key";
-        string privateKeyPath = $"{sharedDir}/kyber_private.key";
-        string kyberCtPath = $"{sharedDir}/kyber_ciphertext.bin";
+        try
+        {
+            // Step 1: Fetch server's public key
+            Console.WriteLine("📥 Fetching server's ML-KEM-1024 public key...");
+            byte[] serverPublicKey = await FetchServerPublicKey();
+            Console.WriteLine($"✓ Downloaded public key: {serverPublicKey.Length} bytes\n");
 
-        // ============ KYBER KEY GENERATION ============
-        Console.WriteLine("DotNet: Generating Kyber1024 keypair...");
-        var (publicKey, privateKey) = KyberHelper.GenerateKeyPair();
-        
-        // Save keys for cross-platform testing
-        File.WriteAllBytes(publicKeyPath, publicKey);
-        File.WriteAllBytes(privateKeyPath, privateKey);
-        
-        // Also save as base64 for easier reading
-        File.WriteAllText($"{sharedDir}/kyber_public.txt", Convert.ToBase64String(publicKey));
-        File.WriteAllText($"{sharedDir}/kyber_private.txt", Convert.ToBase64String(privateKey));
-        
-        Console.WriteLine($"DotNet: Public key size: {publicKey.Length} bytes");
-        Console.WriteLine($"DotNet: Private key size: {privateKey.Length} bytes");
+            // Step 2: Test with sample file
+            string sampleFilePath = $"{SHARED_DIR}/sample.txt";
+            if (!File.Exists(sampleFilePath))
+            {
+                Console.WriteLine("✗ ERROR: sample.txt not found in {sampleFilePath}");
+                return;
+            }
 
-        // ============ ENCRYPTION ============
-        Console.WriteLine("\nDotNet: Starting encryption...");
-        
-        // Step 1: Encapsulate shared secret using Kyber1024
-        var (kyberCiphertext, sharedSecret) = KyberHelper.Encapsulate(publicKey);
-        
-        // Save Kyber ciphertext
-        File.WriteAllBytes(kyberCtPath, kyberCiphertext);
-        File.WriteAllText($"{sharedDir}/kyber_ciphertext.txt", Convert.ToBase64String(kyberCiphertext));
-        
-        Console.WriteLine($"DotNet: Kyber ciphertext size: {kyberCiphertext.Length} bytes");
-        Console.WriteLine($"DotNet: Shared secret size: {sharedSecret.Length} bytes");
-        
-        // Step 2: Derive AES-256 key from shared secret
-        byte[] aesKey = KyberHelper.DeriveAesKey(sharedSecret);
-        
-        // Save AES key for legacy compatibility testing
-        File.WriteAllText($"{sharedDir}/key.txt", Convert.ToBase64String(aesKey));
-        
-        // Step 3: Encrypt plaintext with AES-256-GCM
-        byte[] plaintext = File.ReadAllBytes(plainPath);
-        byte[] aesEncrypted = AesGcmHelper.Encrypt(plaintext, aesKey);
-        
-        // Step 4: Combine Kyber ciphertext and AES encrypted data
-        // Format: [kyber_ciphertext_length:4bytes][kyber_ciphertext][aes_encrypted]
-        byte[] fullEncrypted = new byte[4 + kyberCiphertext.Length + aesEncrypted.Length];
-        BitConverter.GetBytes(kyberCiphertext.Length).CopyTo(fullEncrypted, 0);
-        kyberCiphertext.CopyTo(fullEncrypted, 4);
-        aesEncrypted.CopyTo(fullEncrypted, 4 + kyberCiphertext.Length);
-        
-        File.WriteAllBytes(encPath, fullEncrypted);
-        
-        Console.WriteLine("DotNet: File encrypted with post-quantum security.");
+            // Step 3: Encrypt file
+            Console.WriteLine("🔐 Encrypting file...");
+            byte[] plaintext = File.ReadAllBytes(sampleFilePath);
+            byte[] encryptedPacket = EncryptFile(plaintext, serverPublicKey);
+            Console.WriteLine($"✓ File encrypted: {plaintext.Length} → {encryptedPacket.Length} bytes\n");
 
-        // ============ DECRYPTION ============
-        Console.WriteLine("\nDotNet: Starting decryption...");
-        
-        // Step 1: Read encrypted file
-        byte[] fullEncryptedData = File.ReadAllBytes(encPath);
-        
-        // Step 2: Extract Kyber ciphertext length
-        int kyberCtLen = BitConverter.ToInt32(fullEncryptedData, 0);
-        
-        // Step 3: Extract Kyber ciphertext and AES encrypted data
-        byte[] extractedKyberCt = new byte[kyberCtLen];
-        byte[] extractedAesData = new byte[fullEncryptedData.Length - 4 - kyberCtLen];
-        
-        Buffer.BlockCopy(fullEncryptedData, 4, extractedKyberCt, 0, kyberCtLen);
-        Buffer.BlockCopy(fullEncryptedData, 4 + kyberCtLen, extractedAesData, 0, extractedAesData.Length);
-        
-        // Step 4: Decapsulate shared secret using Kyber private key
-        byte[] recoveredSecret = KyberHelper.Decapsulate(privateKey, extractedKyberCt);
-        
-        // Step 5: Derive AES key from recovered secret
-        byte[] recoveredAesKey = KyberHelper.DeriveAesKey(recoveredSecret);
-        
-        // Step 6: Decrypt AES data
-        byte[] decrypted = AesGcmHelper.Decrypt(extractedAesData, recoveredAesKey);
+            // Step 4: Upload encrypted file to server
+            Console.WriteLine("📤 Uploading encrypted file to server...");
+            await UploadEncryptedFile(encryptedPacket);
+            Console.WriteLine("✓ File uploaded successfully\n");
 
-        // Write the decrypted plaintext to the output file
-        File.WriteAllBytes(decPath, decrypted);
+            // Step 5: Save encrypted packet locally (for testing/verification)
+            string encryptedPath = $"{SHARED_DIR}/encrypted-dotnet.bin";
+            File.WriteAllBytes(encryptedPath, encryptedPacket);
+            Console.WriteLine($"✓ Saved encrypted packet: {encryptedPath}");
 
-        Console.WriteLine("DotNet: File decrypted successfully.");
-        Console.WriteLine($"DotNet: Decrypted content: {System.Text.Encoding.UTF8.GetString(decrypted)}");
+            Console.WriteLine("\n" + "=".PadRight(60, '='));
+            Console.WriteLine("✓ Encryption workflow completed successfully");
+            Console.WriteLine("=".PadRight(60, '='));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"\n✗ ERROR: {ex.Message}");
+            Console.WriteLine($"Stack trace: {ex.StackTrace}");
+            Environment.Exit(1);
+        }
+    }
+
+    // ====================
+    // Network Operations
+    // ====================
+
+    /// <summary>
+    /// Download server's ML-KEM-1024 public key from /api/kyber/public-key endpoint
+    /// </summary>
+    static async Task<byte[]> FetchServerPublicKey()
+    {
+        using (var client = new HttpClient() { Timeout = TimeSpan.FromSeconds(30) })
+        {
+            try
+            {
+                string url = $"{SERVER_URL}/api/kyber/public-key";
+                Console.WriteLine($"  GET {url}");
+                var response = await client.GetAsync(url);
+                response.EnsureSuccessStatusCode();
+                
+                byte[] publicKey = await response.Content.ReadAsByteArrayAsync();
+                
+                if (publicKey.Length != KYBER_PUBLIC_KEY_SIZE)
+                {
+                    throw new Exception($"Invalid public key size: {publicKey.Length} (expected {KYBER_PUBLIC_KEY_SIZE})");
+                }
+                
+                return publicKey;
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"Failed to fetch public key: {ex.Message}", ex);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Upload encrypted file to server's /api/files/upload endpoint
+    /// 
+    /// Packet format: [Kyber CT: 1568][AES encrypted: variable]
+    /// </summary>
+    static async Task UploadEncryptedFile(byte[] encryptedPacket)
+    {
+        using (var client = new HttpClient() { Timeout = TimeSpan.FromSeconds(120) })
+        {
+            try
+            {
+                string url = $"{SERVER_URL}/api/files/upload";
+                Console.WriteLine($"  POST {url} ({encryptedPacket.Length} bytes)");
+                
+                var content = new ByteArrayContent(encryptedPacket);
+                content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+                
+                var response = await client.PostAsync(url, content);
+                response.EnsureSuccessStatusCode();
+                
+                string responseText = await response.Content.ReadAsStringAsync();
+                Console.WriteLine($"  Response: {responseText}");
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"Failed to upload file: {ex.Message}", ex);
+            }
+        }
+    }
+
+    // ====================
+    // Cryptographic Operations
+    // ====================
+
+    /// <summary>
+    /// Encrypt file using ML-KEM-1024 + AES-256-GCM hybrid encryption.
+    /// 
+    /// Flow:
+    /// 1. Encapsulate shared secret using server's public key
+    /// 2. Derive AES key from shared secret using HKDF-SHA256
+    /// 3. Encrypt plaintext with AES-256-GCM
+    /// 4. Return: [Kyber ciphertext: 1568][AES encrypted: variable]
+    /// </summary>
+    static byte[] EncryptFile(byte[] plaintext, byte[] serverPublicKey)
+    {
+        // Step 1: Encapsulate
+        Console.WriteLine($"  [1/3] Encapsulating shared secret...");
+        var (kyberCiphertext, sharedSecret) = LibOqsKyber.Encapsulate(serverPublicKey);
+        
+        if (kyberCiphertext.Length != KYBER_CIPHERTEXT_SIZE)
+        {
+            throw new Exception($"Invalid Kyber ciphertext size: {kyberCiphertext.Length}");
+        }
+        if (sharedSecret.Length != KYBER_SHARED_SECRET_SIZE)
+        {
+            throw new Exception($"Invalid Kyber shared secret size: {sharedSecret.Length}");
+        }
+        
+        Console.WriteLine($"      ✓ Ciphertext: {kyberCiphertext.Length} bytes");
+        Console.WriteLine($"      ✓ Shared secret: {sharedSecret.Length} bytes");
+        
+        // Step 2: Derive AES key using HKDF-SHA256 (IDENTICAL to server)
+        Console.WriteLine($"  [2/3] Deriving AES key (HKDF-SHA256)...");
+        byte[] aesKey = DeriveAesKey(sharedSecret);
+        Console.WriteLine($"      ✓ AES key: {aesKey.Length} bytes (salt=32x0, info='AES-256-GCM')");
+        
+        // Step 3: Encrypt with AES-256-GCM
+        Console.WriteLine($"  [3/3] Encrypting with AES-256-GCM...");
+        byte[] aesEncrypted = EncryptAesGcm(plaintext, aesKey);
+        Console.WriteLine($"      ✓ Encrypted: {aesEncrypted.Length} bytes (includes nonce:12 + CT + tag:16)");
+        
+        // Combine into packet: [Kyber CT][AES encrypted]
+        byte[] packet = new byte[kyberCiphertext.Length + aesEncrypted.Length];
+        Buffer.BlockCopy(kyberCiphertext, 0, packet, 0, kyberCiphertext.Length);
+        Buffer.BlockCopy(aesEncrypted, 0, packet, kyberCiphertext.Length, aesEncrypted.Length);
+        
+        return packet;
+    }
+
+    /// <summary>
+    /// Derive AES-256 key from Kyber shared secret using HKDF-SHA256.
+    /// 
+    /// CRITICAL: Must be IDENTICAL on all platforms (server, .NET, React Native)
+    /// 
+    /// Parameters:
+    /// - Salt: 32 zero bytes
+    /// - Info: "AES-256-GCM"
+    /// - Hash: SHA-256
+    /// - Output: 32 bytes
+    /// </summary>
+    static byte[] DeriveAesKey(byte[] sharedSecret)
+    {
+        if (sharedSecret.Length != KYBER_SHARED_SECRET_SIZE)
+        {
+            throw new ArgumentException($"Shared secret must be {KYBER_SHARED_SECRET_SIZE} bytes");
+        }
+        
+        // HKDF-SHA256 Extract phase
+        using (var hmac = new HMACSHA256(HKDF_SALT))
+        {
+            byte[] prk = hmac.ComputeHash(sharedSecret);
+            
+            // HKDF-SHA256 Expand phase
+            using (var hmac2 = new HMACSHA256(prk))
+            {
+                byte[] t = new byte[0];
+                byte[] okm = new byte[HKDF_OUTPUT_LENGTH];
+                int iterations = (HKDF_OUTPUT_LENGTH + 31) / 32;
+                
+                for (int i = 1; i <= iterations; i++)
+                {
+                    using (var hmac3 = new HMACSHA256(prk))
+                    {
+                        // T(i) = HMAC-Hash(PRK, T(i-1) | info | i)
+                        hmac3.TransformBlock(t, 0, t.Length, null, 0);
+                        hmac3.TransformBlock(HKDF_INFO, 0, HKDF_INFO.Length, null, 0);
+                        hmac3.TransformFinalBlock(new byte[] { (byte)i }, 0, 1);
+                        t = hmac3.Hash;
+                        
+                        int copyLen = Math.Min(32, HKDF_OUTPUT_LENGTH - (i - 1) * 32);
+                        Buffer.BlockCopy(t, 0, okm, (i - 1) * 32, copyLen);
+                    }
+                }
+                
+                return okm;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Encrypt plaintext with AES-256-GCM.
+    /// 
+    /// Returns: [nonce: 12 bytes][ciphertext][tag: 16 bytes]
+    /// </summary>
+    static byte[] EncryptAesGcm(byte[] plaintext, byte[] aesKey)
+    {
+        if (aesKey.Length != 32)
+        {
+            throw new ArgumentException("AES key must be 32 bytes");
+        }
+        
+        // Generate random 12-byte nonce
+        byte[] nonce = new byte[12];
+        using (var rng = RandomNumberGenerator.Create())
+        {
+            rng.GetBytes(nonce);
+        }
+        
+        // Encrypt using AES-256-GCM
+        using (var aes = new AesGcm(aesKey))
+        {
+            byte[] ciphertext = new byte[plaintext.Length];
+            byte[] tag = new byte[16];
+            
+            aes.Encrypt(nonce, plaintext, null, ciphertext, tag);
+            
+            // Return: [nonce][ciphertext][tag]
+            byte[] result = new byte[12 + ciphertext.Length + 16];
+            Buffer.BlockCopy(nonce, 0, result, 0, 12);
+            Buffer.BlockCopy(ciphertext, 0, result, 12, ciphertext.Length);
+            Buffer.BlockCopy(tag, 0, result, 12 + ciphertext.Length, 16);
+            
+            return result;
+        }
     }
 }
+

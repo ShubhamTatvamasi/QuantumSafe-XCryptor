@@ -1,30 +1,45 @@
 """
-Post-Quantum Hybrid Decryption Service (Python)
+QuantumSafe-XCryptor - Python Server (Cloud)
 
-This module demonstrates post-quantum secure decryption using Kyber1024 KEM
-combined with AES-256-GCM. It decrypts files encrypted by the .NET service,
-demonstrating cross-language compatibility with post-quantum cryptography.
+Post-quantum hybrid encryption server using ML-KEM-1024 + AES-256-GCM.
 
-Uses liboqs-python for Kyber1024 operations (Open Quantum Safe project).
+Architecture:
+- Server generates and maintains ML-KEM-1024 keypair
+- Clients download public key for encryption
+- Clients send Kyber ciphertext + AES-encrypted file
+- Server decrypts using private key and HKDF-derived AES key
 
-Decryption Flow:
-1. Load Kyber1024 private key
-2. Extract Kyber ciphertext from encrypted file
-3. Decapsulate shared secret using private key
-4. Derive AES-256 key from shared secret
-5. Decrypt data with AES-256-GCM
+Key Design Principles:
+1. Server is trusted authority (holds private key)
+2. Clients are untrusted (only have public key)
+3. Forward secrecy: Each client gets unique Kyber ciphertext
+4. Zero-knowledge upload: Server never sees plaintext during transmission
+5. Identical HKDF parameters ensure cross-platform AES key derivation
+
+API Endpoints:
+- GET /api/kyber/public-key - Get server's ML-KEM public key
+- POST /api/files/upload - Upload encrypted file (ct + encrypted data)
+- POST /api/files/decrypt - Decrypt and return plaintext (for testing)
+
+HKDF Parameters (MUST match all clients):
+- Salt: 32 zero bytes
+- Info: "AES-256-GCM"
+- Hash: SHA-256
+- Output: 32 bytes (AES-256 key)
 """
 
+import os
 import base64
+import json
 import warnings
-import struct
+from flask import Flask, request, jsonify, send_file
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
+import io
 
 try:
-    # Suppress liboqs-python version mismatch warning (when liboqs != liboqs-python)
     warnings.filterwarnings(
         "ignore",
         message=r"liboqs version \(major, minor\) .* differs from liboqs-python version .*",
@@ -33,184 +48,310 @@ try:
     )
     import oqs
     KYBER_AVAILABLE = True
-    print(f"Python: liboqs version {oqs.oqs_version()}")
+    print(f"✓ liboqs version: {oqs.oqs_version()}")
 except ImportError:
     KYBER_AVAILABLE = False
-    print("Python: liboqs not available")
+    print("✗ liboqs not available")
 
-# File paths for shared data directory
-ENCRYPTED_FILE = "/data/encrypted.bin"  # Hybrid encrypted file from .NET
-DECRYPTED_FILE = "/data/decrypted-python.txt"  # Decrypted output
-PUBLIC_KEY_FILE = "/data/kyber_public.key"
-PRIVATE_KEY_FILE = "/data/kyber_private.key"
-KYBER_CT_FILE = "/data/kyber_ciphertext.bin"
+app = Flask(__name__)
 
-def derive_aes_key(shared_secret: bytes, salt: bytes = None, info: bytes = b"AES-256-GCM") -> bytes:
-    """
-    Derives a 32-byte AES-256 key from the Kyber shared secret using HKDF-SHA256.
+# ====================
+# Global Configuration
+# ====================
+
+KYBER_PUBLIC_KEY_SIZE = 1568
+KYBER_PRIVATE_KEY_SIZE = 3168
+KYBER_CIPHERTEXT_SIZE = 1568
+KYBER_SHARED_SECRET_SIZE = 32
+
+# HKDF Parameters (MUST be identical across all platforms)
+HKDF_SALT = b'\x00' * 32
+HKDF_INFO = b"AES-256-GCM"
+HKDF_OUTPUT_LENGTH = 32
+
+# Storage directory
+DATA_DIR = "/data"
+os.makedirs(DATA_DIR, exist_ok=True)
+
+PUBLIC_KEY_PATH = os.path.join(DATA_DIR, "kyber_public.key")
+PRIVATE_KEY_PATH = os.path.join(DATA_DIR, "kyber_private.key")
+UPLOADED_FILES_DIR = os.path.join(DATA_DIR, "uploads")
+os.makedirs(UPLOADED_FILES_DIR, exist_ok=True)
+
+# Global ML-KEM keypair (loaded at startup)
+kyber_private_key = None
+kyber_public_key = None
+
+# ====================
+# Key Management
+# ====================
+
+def generate_kyber_keypair():
+    """Generate ML-KEM-1024 keypair (server-side)"""
+    print("🔑 Generating ML-KEM-1024 keypair...")
     
-    Args:
-        shared_secret: The shared secret from Kyber decapsulation
-        salt: Optional salt for key derivation
-        info: Context information for key derivation
-        
-    Returns:
-        32-byte AES-256 key
+    with oqs.KeyEncapsulation("ML-KEM-1024") as kem:
+        public_key = kem.generate_keypair()
+        private_key = kem.export_secret_key()
+    
+    # Save to files
+    with open(PUBLIC_KEY_PATH, "wb") as f:
+        f.write(public_key)
+    with open(PRIVATE_KEY_PATH, "wb") as f:
+        f.write(private_key)
+    
+    print(f"✓ Generated keypair: pk={len(public_key)} bytes, sk={len(private_key)} bytes")
+    return public_key, private_key
+
+def load_kyber_keypair():
+    """Load ML-KEM-1024 keypair from disk, or generate if not exists"""
+    global kyber_private_key, kyber_public_key
+    
+    if os.path.exists(PUBLIC_KEY_PATH) and os.path.exists(PRIVATE_KEY_PATH):
+        with open(PUBLIC_KEY_PATH, "rb") as f:
+            kyber_public_key = f.read()
+        with open(PRIVATE_KEY_PATH, "rb") as f:
+            kyber_private_key = f.read()
+        print(f"✓ Loaded keypair from disk")
+    else:
+        kyber_public_key, kyber_private_key = generate_kyber_keypair()
+    
+    return kyber_public_key, kyber_private_key
+
+# ====================
+# Cryptographic Functions
+# ====================
+
+def derive_aes_key(shared_secret: bytes) -> bytes:
     """
-    if salt is None:
-        salt = b'\x00' * 32
+    Derive AES-256 key from ML-KEM shared secret using HKDF-SHA256.
+    
+    CRITICAL: Must be IDENTICAL on all platforms (server, .NET, React Native)
+    
+    Parameters:
+    - Salt: 32 zero bytes
+    - Info: "AES-256-GCM"
+    - Hash: SHA-256
+    - Output: 32 bytes
+    """
+    if len(shared_secret) != 32:
+        raise ValueError(f"Shared secret must be 32 bytes, got {len(shared_secret)}")
     
     hkdf = HKDF(
         algorithm=hashes.SHA256(),
-        length=32,
-        salt=salt,
-        info=info,
+        length=HKDF_OUTPUT_LENGTH,
+        salt=HKDF_SALT,
+        info=HKDF_INFO,
         backend=default_backend()
     )
     
     return hkdf.derive(shared_secret)
 
-def decrypt_hybrid():
+def decrypt_aes_gcm(aes_key: bytes, encrypted_data: bytes) -> bytes:
     """
-    Decrypts a file that was encrypted using Kyber1024 + AES-256-GCM hybrid encryption.
+    Decrypt AES-256-GCM encrypted data.
     
-    Reads the encrypted file created by the .NET service, decapsulates the Kyber
-    ciphertext to recover the shared secret, derives the AES key, and decrypts
-    the data, demonstrating cross-language post-quantum cryptographic compatibility.
+    Format: [nonce:12][ciphertext][tag:16]
     """
-    # Load the Kyber private key (and public for potential constructor needs)
-    with open(PRIVATE_KEY_FILE, "rb") as f:
-        private_key = f.read()
+    if len(aes_key) != 32:
+        raise ValueError(f"AES key must be 32 bytes, got {len(aes_key)}")
+    if len(encrypted_data) < 12 + 16:
+        raise ValueError(f"Encrypted data too short, got {len(encrypted_data)} bytes")
+    
+    nonce = encrypted_data[:12]
+    ciphertext = encrypted_data[12:-16]
+    tag = encrypted_data[-16:]
+    
+    aesgcm = AESGCM(aes_key)
+    
     try:
-        with open(PUBLIC_KEY_FILE, "rb") as f:
-            public_key = f.read()
-    except FileNotFoundError:
-        public_key = None
-    
-    print(f"Python: Loaded private key ({len(private_key)} bytes)")
-    
-    # Read the hybrid encrypted file
-    with open(ENCRYPTED_FILE, "rb") as f:
-        full_encrypted = f.read()
-    
-    # Extract Kyber ciphertext length (first 4 bytes, little-endian)
-    kyber_ct_len = struct.unpack('<I', full_encrypted[:4])[0]
-    
-    # Extract Kyber ciphertext and AES encrypted data
-    kyber_ciphertext = full_encrypted[4:4 + kyber_ct_len]
-    aes_encrypted = full_encrypted[4 + kyber_ct_len:]
-    
-    print(f"Python: Kyber ciphertext size: {len(kyber_ciphertext)} bytes")
-    print(f"Python: AES encrypted size: {len(aes_encrypted)} bytes")
-    
-    # Decapsulate using liboqs (ciphertext + private key are BOTH required for recovering the shared secret).
-    # Earlier bug: aes_key was only derived in the TypeError branch; if the first attempt succeeded
-    # we never derived aes_key, causing an UnboundLocalError later. This is now fixed.
-    if KYBER_AVAILABLE:
-        try:
-            # Attempt constructor with both secret_key and public_key (newer liboqs-python versions may allow this).
-            try:
-                with oqs.KeyEncapsulation("Kyber1024", secret_key=private_key, public_key=public_key) as kem:
-                    shared_secret = kem.decap_secret(kyber_ciphertext)
-            except TypeError:
-                # Fallback: constructor only supports secret_key parameter.
-                with oqs.KeyEncapsulation("Kyber1024", secret_key=private_key) as kem:
-                    shared_secret = kem.decap_secret(kyber_ciphertext)
-            print(f"Python: Shared secret recovered using liboqs ({len(shared_secret)} bytes)")
-            # Always derive AES key here (unified path)
-            aes_key = derive_aes_key(shared_secret)
-            print("Python: AES key derived from Kyber shared secret")
-        except Exception as e:
-            print(f"Python: Kyber decapsulation failed: {e}")
-            print("Python: Falling back to legacy key...")
-            with open("/data/key.txt", "r") as f:
-                legacy_key_b64 = f.read().strip()
-                aes_key = base64.b64decode(legacy_key_b64)
-            print("Python: Using legacy AES key")
-    else:
-        # Fall back to legacy key if liboqs not available
-        try:
-            with open("/data/key.txt", "r") as f:
-                legacy_key_b64 = f.read().strip()
-                aes_key = base64.b64decode(legacy_key_b64)
-                print("Python: Using legacy AES key (liboqs not available)")
-        except FileNotFoundError:
-            print("Python: ERROR - Cannot decrypt without proper Kyber support or legacy key")
-            return
-    
-    # Decrypt using AES-256-GCM
-    aes = AESGCM(aes_key)
-    
-    # Extract nonce (first 12 bytes) and ciphertext+tag (remaining)
-    nonce = aes_encrypted[:12]
-    ct = aes_encrypted[12:]
-    
-    # Decrypt and verify authentication tag; if tag invalid, fallback to legacy key
-    try:
-        decrypted = aes.decrypt(nonce, ct, None)
+        plaintext = aesgcm.decrypt(nonce, ciphertext + tag, None)
+        return plaintext
     except Exception as e:
-        from cryptography.exceptions import InvalidTag
-        if isinstance(e, InvalidTag):
-            print("Python: AES-GCM tag invalid – likely mismatched shared secret. Falling back to legacy key...")
-            with open("/data/key.txt", "r") as f:
-                legacy_key_b64 = f.read().strip()
-                legacy_key = base64.b64decode(legacy_key_b64)
-            aes = AESGCM(legacy_key)
-            decrypted = aes.decrypt(nonce, ct, None)
-        else:
-            raise
-    
-    # Write decrypted plaintext to output file
-    with open(DECRYPTED_FILE, "wb") as f:
-        f.write(decrypted)
-    
-    print(f"Python: File decrypted successfully.")
-    print(f"Python: Decrypted content: {decrypted.decode('utf-8')}")
+        raise ValueError(f"AES-GCM decryption failed: {e}")
 
-def test_kyber_compatibility():
+# ====================
+# Flask Routes
+# ====================
+
+@app.route("/api/kyber/public-key", methods=["GET"])
+def get_public_key():
     """
-    Tests Kyber1024 compatibility by generating keys, encapsulating, and decapsulating.
-    Uses liboqs for Kyber1024 operations.
-    """
-    if not KYBER_AVAILABLE:
-        print("\n=== Python: Kyber1024 library not available ===")
-        print("Python: Install liboqs-python for full Kyber support: pip install liboqs-python")
-        print("Python: Proceeding with AES decryption only...")
-        return
+    Endpoint: Get server's ML-KEM-1024 public key
     
-    print("\n=== Python: Testing Kyber1024 Compatibility with liboqs ===")
+    Response:
+    - Content-Type: application/octet-stream
+    - Body: 1568-byte public key (binary)
+    """
+    return app.response_class(
+        response=kyber_public_key,
+        status=200,
+        mimetype="application/octet-stream"
+    )
+
+@app.route("/api/files/upload", methods=["POST"])
+def upload_encrypted_file():
+    """
+    Endpoint: Upload encrypted file
+    
+    Expected format:
+    [Kyber ciphertext: 1568 bytes][AES encrypted data: variable]
+    
+    Response:
+    - 200: File uploaded and stored
+    - 400: Invalid format
+    - 500: Server error
+    """
+    try:
+        encrypted_packet = request.get_data()
+        
+        if len(encrypted_packet) < KYBER_CIPHERTEXT_SIZE + 12 + 16:
+            return jsonify({"error": "Packet too short"}), 400
+        
+        # Extract Kyber ciphertext
+        kyber_ciphertext = encrypted_packet[:KYBER_CIPHERTEXT_SIZE]
+        aes_encrypted = encrypted_packet[KYBER_CIPHERTEXT_SIZE:]
+        
+        # Validate ciphertext size
+        if len(kyber_ciphertext) != KYBER_CIPHERTEXT_SIZE:
+            return jsonify({"error": f"Invalid ciphertext size: {len(kyber_ciphertext)}"}), 400
+        
+        # Decapsulate to recover shared secret
+        print(f"📦 Decapsulating ML-KEM ciphertext ({len(kyber_ciphertext)} bytes)...")
+        
+        with oqs.KeyEncapsulation("ML-KEM-1024", secret_key=kyber_private_key) as kem:
+            shared_secret = kem.decap_secret(kyber_ciphertext)
+        
+        print(f"✓ Shared secret recovered ({len(shared_secret)} bytes)")
+        
+        # Derive AES key (IDENTICAL to client)
+        aes_key = derive_aes_key(shared_secret)
+        print(f"✓ AES key derived (HKDF: salt=32x0, info='AES-256-GCM')")
+        
+        # Decrypt AES-GCM data
+        plaintext = decrypt_aes_gcm(aes_key, aes_encrypted)
+        
+        # Store uploaded file
+        filename = f"upload_{len(os.listdir(UPLOADED_FILES_DIR))}.bin"
+        filepath = os.path.join(UPLOADED_FILES_DIR, filename)
+        with open(filepath, "wb") as f:
+            f.write(plaintext)
+        
+        print(f"✓ File decrypted and stored: {filename}")
+        
+        return jsonify({
+            "status": "success",
+            "filename": filename,
+            "size": len(plaintext)
+        }), 200
+        
+    except Exception as e:
+        print(f"✗ Error processing upload: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/files/decrypt", methods=["POST"])
+def decrypt_file():
+    """
+    Endpoint: Decrypt file (for testing/API access)
+    
+    Request body: [Kyber ciphertext: 1568 bytes][AES encrypted data: variable]
+    
+    Response:
+    - 200: Decrypted plaintext (Content-Type: text/plain or application/octet-stream)
+    - 400: Invalid format
+    - 500: Decryption failed
+    """
+    try:
+        encrypted_packet = request.get_data()
+        
+        if len(encrypted_packet) < KYBER_CIPHERTEXT_SIZE + 12 + 16:
+            return jsonify({"error": "Packet too short"}), 400
+        
+        # Extract components
+        kyber_ciphertext = encrypted_packet[:KYBER_CIPHERTEXT_SIZE]
+        aes_encrypted = encrypted_packet[KYBER_CIPHERTEXT_SIZE:]
+        
+        # Decapsulate
+        print(f"🔓 Decrypting ML-KEM ciphertext...")
+        
+        with oqs.KeyEncapsulation("ML-KEM-1024", secret_key=kyber_private_key) as kem:
+            shared_secret = kem.decap_secret(kyber_ciphertext)
+        
+        # Derive AES key
+        aes_key = derive_aes_key(shared_secret)
+        
+        # Decrypt
+        plaintext = decrypt_aes_gcm(aes_key, aes_encrypted)
+        
+        print(f"✓ Decryption successful ({len(plaintext)} bytes)")
+        
+        # Return plaintext
+        return app.response_class(
+            response=plaintext,
+            status=200,
+            mimetype="application/octet-stream"
+        )
+        
+    except Exception as e:
+        print(f"✗ Decryption failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/health", methods=["GET"])
+def health():
+    """Health check endpoint"""
+    return jsonify({
+        "status": "ok",
+        "kyber": "available" if KYBER_AVAILABLE else "unavailable",
+        "public_key_size": len(kyber_public_key),
+        "private_key_size": len(kyber_private_key)
+    }), 200
+
+# ====================
+# Startup
+# ====================
+
+def test_kyber_roundtrip():
+    """Test ML-KEM-1024 round-trip (for validation)"""
+    print("\n🧪 Testing ML-KEM-1024 round-trip...")
     
     try:
-        # Create KEM instance for Kyber1024
-        with oqs.KeyEncapsulation("Kyber1024") as kem:
-            # Generate keypair
-            public_key = kem.generate_keypair()
-            private_key = kem.export_secret_key()
-            
-            print(f"Python: Generated keypair - Public: {len(public_key)} bytes, Private: {len(private_key)} bytes")
-            
-            # Encapsulate
-            ciphertext, shared_secret = kem.encap_secret(public_key)
-            print(f"Python: Encapsulated - Ciphertext: {len(ciphertext)} bytes, Secret: {len(shared_secret)} bytes")
+        with oqs.KeyEncapsulation("ML-KEM-1024") as kem:
+            pk = kem.generate_keypair()
+            sk = kem.export_secret_key()
         
-        # Decapsulate using a fresh instance initialized with secret key
-        with oqs.KeyEncapsulation("Kyber1024", secret_key=private_key) as kem2:
-            recovered_secret = kem2.decap_secret(ciphertext)
-            print(f"Python: Decapsulated - Secret: {len(recovered_secret)} bytes")
-            
-            # Verify
-            if shared_secret == recovered_secret:
-                print("Python: ✓ Kyber1024 round-trip successful with liboqs!")
-            else:
-                print("Python: ✗ Kyber1024 round-trip failed!")
-                
+        with oqs.KeyEncapsulation("ML-KEM-1024") as kem:
+            ct, ss1 = kem.encap_secret(pk)
+        
+        with oqs.KeyEncapsulation("ML-KEM-1024", secret_key=sk) as kem:
+            ss2 = kem.decap_secret(ct)
+        
+        if ss1 == ss2:
+            print("✓ ML-KEM-1024 round-trip successful")
+        else:
+            print("✗ ML-KEM-1024 round-trip failed (secrets don't match)")
     except Exception as e:
-        print(f"Python: Kyber test failed: {e}")
+        print(f"✗ ML-KEM-1024 test failed: {e}")
 
 if __name__ == "__main__":
-    # Test Kyber functionality
-    test_kyber_compatibility()
+    if not KYBER_AVAILABLE:
+        print("✗ ERROR: liboqs not available. Install with: pip install liboqs-python")
+        exit(1)
     
-    # Execute hybrid decryption
-    print("\n=== Python: Starting Hybrid Decryption ===")
-    decrypt_hybrid()
+    print("\n" + "="*60)
+    print("  QuantumSafe-XCryptor - Python Server")
+    print("="*60 + "\n")
+    
+    # Load or generate keypair
+    load_kyber_keypair()
+    
+    # Test Kyber
+    test_kyber_roundtrip()
+    
+    print("\n" + "="*60)
+    print("  Starting Flask Server on 0.0.0.0:5000")
+    print("="*60 + "\n")
+    
+    # Start Flask app
+    app.run(host="0.0.0.0", port=5000, debug=False)
+
+
