@@ -2,17 +2,19 @@
 
 ## 🏗️ Architecture Overview
 
-QuantumSafe-XCryptor is a distributed post-quantum hybrid encryption system with three tiers:
+QuantumSafe-XCryptor is a post-quantum hybrid encryption system. In the current serverless demo flow:
 
-1. **Cloud Server (Python)** - ML-KEM-1024 KEM key generation and file decryption
-2. **Desktop Client (.NET)** - File encryption using server's public key
-3. **Mobile Client (React Native)** - File encryption using server's public key
+1. **.NET CLI** generates/loads ML-KEM-1024 keypairs, encapsulates, derives AES-256, encrypts the sample, and emits artifacts to `/data`.
+2. **Python CLI** loads the private key, decapsulates the ML-KEM-1024 ciphertext, derives the same AES-256 key, and decrypts the packet from `/data`.
+3. **React Native** remains a client-side encrypt/decrypt reference (not used in the serverless compose run).
 
-The architecture follows a **server-centric KEM model** where:
-- The Python server generates and maintains ML-KEM-1024 keypairs
-- Desktop and mobile clients use the server's public key to encapsulate shared secrets
-- All parties derive identical AES-256 keys using HKDF-SHA256
-- Files are encrypted client-side and transmitted securely to the server
+Exchange happens over a shared volume (`./shared` mounted as `/data`), not HTTP. Artifacts written by .NET for Python to consume:
+- `kyber_public.key`, `kyber_private.key`
+- `kyber_ciphertext.bin` (ML-KEM-1024 ciphertext)
+- `encrypted-dotnet.bin` ([ML-KEM-1024 ciphertext][AES nonce + ciphertext + tag])
+- `decrypted-dotnet.txt` (local verification)
+
+Python CLI uses `kyber_ciphertext.bin` + private key (or the ciphertext within `encrypted-dotnet.bin`) to recover the shared secret, derive AES-256 via HKDF-SHA256, and decrypt to `decrypted-python.txt`.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐

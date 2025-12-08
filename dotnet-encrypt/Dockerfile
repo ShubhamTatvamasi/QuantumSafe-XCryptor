@@ -27,7 +27,7 @@ WORKDIR /app
 
 # Copy project file and restore dependencies first (for better layer caching)
 # This layer will only rebuild if the .csproj file changes
-COPY dotnet-service.csproj .
+COPY dotnet-encrypt.csproj .
 RUN dotnet restore
 
 # Copy all source files
@@ -59,4 +59,4 @@ ENV LD_LIBRARY_PATH=/usr/local/lib
 ENV LD_PRELOAD=/usr/local/lib/liboqs.so
 
 # Run the .NET application when container starts
-CMD ["dotnet", "dotnet-service.dll"]
+CMD ["dotnet", "dotnet-encrypt.dll"]
