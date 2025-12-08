@@ -33,7 +33,7 @@ public static class AesGcmHelper
         byte[] tag = new byte[16]; // AES-GCM uses 16-byte authentication tag
 
         // Perform AES-GCM encryption
-        using var aes = new AesGcm(key);
+        using var aes = new AesGcm(key, tag.Length);
         aes.Encrypt(nonce, plaintext, ciphertext, tag);
 
         // Combine: [nonce][ciphertext][tag] to match Python's format
@@ -74,7 +74,7 @@ public static class AesGcmHelper
         byte[] pt = new byte[ct.Length];
 
         // Perform AES-GCM decryption with authentication verification
-        using var aes = new AesGcm(key);
+        using var aes = new AesGcm(key, tag.Length);
         aes.Decrypt(nonce, ct, tag, pt);
 
         return pt;

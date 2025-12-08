@@ -1,28 +1,40 @@
 # Docker Compose configuration for QuantumSafe-XCryptor
 #
-# Roles:
-# - .NET service: Performs AES-256-GCM encryption (and decryption for self-verification)
-# - Python service: Performs decryption only to validate cross-language compatibility
+# Post-Quantum Hybrid Encryption System (3-Service Architecture)
+# Demonstrates ML-KEM-1024 + AES-256-GCM workflow
 #
-# Both services mount the same host directory ./shared to /data to exchange:
-# - key.txt (base64 32-byte AES key)
-# - sample.txt (plaintext input)
-# - encrypted.bin (output from .NET encryption)
-# - decrypted*.txt (verification outputs)
+# Flow:
+# 1. python-keygen:   Generate ML-KEM-1024 keypair (public/private keys)
+# 2. dotnet-encrypt:  Load public key, encapsulate, encrypt file
+# 3. python-decrypt:  Load private key, decapsulate, decrypt file
+#
+# Shared volume ./shared mounted as /data for key/file exchange:
+# - kyber_public.key / kyber_private.key (ML-KEM-1024 keypairs)
+# - kyber_ciphertext.bin (encapsulated shared secret)
+# - encrypted-dotnet.bin (hybrid encrypted packet)
+# - decrypted-python.txt (verification output)
 
 services:
-  # .NET service (encryption + decryption)
-  dotnet-service:
-    build: ./dotnet-service # Build using Dockerfile in ./dotnet-service
-    container_name: quantumsafe-dotnet
+  # Service 1: Python key generation
+  python-keygen:
+    build: ./python-keygen
     volumes:
-      - ./shared:/data # Shared data volume for keys and IO files
+      - ./shared:/data
 
-  # Python service (decryption only)
-  python-service:
-    build: ./python-service # Build using Dockerfile in ./python-service
-    container_name: quantumsafe-python
+  # Service 2: .NET encapsulation + encryption
+  dotnet-encrypt:
+    build: ./dotnet-encrypt
     volumes:
-      - ./shared:/data # Mount the same shared data volume
+      - ./shared:/data
     depends_on:
-      - dotnet-service # Ensure .NET runs first to produce encrypted.bin
+      python-keygen:
+        condition: service_completed_successfully
+
+  # Service 3: Python decapsulation + decryption
+  python-decrypt:
+    build: ./python-decrypt
+    volumes:
+      - ./shared:/data
+    depends_on:
+      dotnet-encrypt:
+        condition: service_completed_successfully
