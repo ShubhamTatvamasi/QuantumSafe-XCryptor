@@ -184,6 +184,33 @@ This demonstrates the **proper ML-KEM workflow**:
 - [ARCHITECTURE.md](ARCHITECTURE.md) - Detailed system design and cryptographic analysis
 - [NIST ML-KEM](https://csrc.nist.gov/Projects/post-quantum-cryptography) - Official standard
 
+## 📱 React Native Client (Encapsulation + AES-GCM)
+
+The React Native app mirrors the `.NET encrypt` flow using `@noble/post-quantum` (Kyber1024) + HKDF-SHA256 + AES-256-GCM.
+
+### Run (Expo / RN)
+```bash
+cd react-native-app
+npm install   # or yarn
+npm start     # or yarn start
+```
+
+### Configure public key
+- Set `PUBLIC_KEY_B64` in `react-native-app/App.js` to the Base64 of `kyber_public.key` (1568 bytes) produced by `python-keygen`.
+- If unset, the app will generate a demo keypair (for local-only testing).
+
+### What it does
+1) Loads the ML-KEM-1024 public key (1568 bytes)
+2) Encapsulates to get Kyber ciphertext (1568 bytes) + shared secret (32 bytes)
+3) Derives AES key via HKDF-SHA256 (salt=32x0, info="AES-256-GCM", len=32)
+4) Encrypts sample text with AES-256-GCM
+5) Emits packet: `[Kyber CT][Nonce 12][Ciphertext||Tag 16]`
+
+### Interop notes
+- HKDF parameters are identical to .NET/Python (salt=32 zero bytes, info="AES-256-GCM").
+- Packet format matches `.NET` output: `[1568][12][ct][16]`.
+- Use the same `kyber_public.key` to encrypt, and `python-decrypt` can decapsulate/decrypt if you supply the packet.
+
 ## 🔗 Technologies
 
 - **ML-KEM-1024**: [liboqs](https://github.com/open-quantum-safe/liboqs) 0.14.0
