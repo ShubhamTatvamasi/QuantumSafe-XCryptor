@@ -26,10 +26,10 @@ class Program
 {
     private const string SHARED_DIR = "/data";
 
-    // ML-KEM Constants
-    private const int KYBER_PUBLIC_KEY_SIZE = 1568;
-    private const int KYBER_CIPHERTEXT_SIZE = 1568;
-    private const int KYBER_SHARED_SECRET_SIZE = 32;
+    // ML-KEM-1024 Constants
+    private const int ML_KEM_PUBLIC_KEY_SIZE = 1568;
+    private const int ML_KEM_CIPHERTEXT_SIZE = 1568;
+    private const int ML_KEM_SHARED_SECRET_SIZE = 32;
 
     // HKDF Parameters (MUST be identical across all platforms)
     private static readonly byte[] HKDF_SALT = new byte[32]; // 32 zero bytes
@@ -52,9 +52,9 @@ class Program
             byte[] publicKey = File.ReadAllBytes(pkPath);
             Console.WriteLine($"✓ Public key loaded: {publicKey.Length} bytes from {pkPath}\n");
 
-            if (publicKey.Length != KYBER_PUBLIC_KEY_SIZE)
+            if (publicKey.Length != ML_KEM_PUBLIC_KEY_SIZE)
             {
-                throw new Exception($"Invalid public key size: {publicKey.Length} bytes (expected {KYBER_PUBLIC_KEY_SIZE})");
+                throw new Exception($"Invalid public key size: {publicKey.Length} bytes (expected {ML_KEM_PUBLIC_KEY_SIZE})");
             }
 
             // Ensure sample plaintext exists
@@ -75,7 +75,7 @@ class Program
             string encryptedPath = Path.Combine(SHARED_DIR, "encrypted-dotnet.bin");
             File.WriteAllBytes(encryptedPath, encryptedPacket);
             Console.WriteLine($"✓ Encrypted packet written: {encryptedPath} ({encryptedPacket.Length} bytes)");
-            Console.WriteLine($"  Format: [Kyber CT: {KYBER_CIPHERTEXT_SIZE}][Nonce: 12][AES-CT: {encryptedPacket.Length - KYBER_CIPHERTEXT_SIZE - 12 - 16}][Tag: 16]\n");
+            Console.WriteLine($"  Format: [ML-KEM CT: {ML_KEM_CIPHERTEXT_SIZE}][Nonce: 12][AES-CT: {encryptedPacket.Length - ML_KEM_CIPHERTEXT_SIZE - 12 - 16}][Tag: 16]\n");
 
             Console.WriteLine("=".PadRight(60, '='));
             Console.WriteLine("✅ Encapsulation complete! Ready for Python decryption service.");
@@ -119,7 +119,7 @@ class Program
     /// 1. Encapsulate shared secret using public key
     /// 2. Derive AES key from shared secret using HKDF-SHA256 (salt=32x0, info="AES-256-GCM")
     /// 3. Encrypt plaintext with AES-256-GCM
-    /// 4. Return: [Kyber ciphertext: 1568][AES encrypted: variable]
+    /// 4. Return: [ML-KEM ciphertext: 1568][AES encrypted: variable]
     /// </summary>
     static (byte[] Packet, byte[] KyberCiphertext) EncryptFile(byte[] plaintext, byte[] publicKey)
     {
@@ -127,13 +127,13 @@ class Program
         Console.WriteLine($"  [1/3] 🔒 Encapsulating with public key: {Path.Combine(SHARED_DIR, "kyber_public.key")}");
         var (kyberCiphertext, sharedSecret) = LibOqsKyber.Encapsulate(publicKey);
         
-        if (kyberCiphertext.Length != KYBER_CIPHERTEXT_SIZE)
+        if (kyberCiphertext.Length != ML_KEM_CIPHERTEXT_SIZE)
         {
-            throw new Exception($"Invalid Kyber ciphertext size: {kyberCiphertext.Length}");
+            throw new Exception($"Invalid ML-KEM ciphertext size: {kyberCiphertext.Length}");
         }
-        if (sharedSecret.Length != KYBER_SHARED_SECRET_SIZE)
+        if (sharedSecret.Length != ML_KEM_SHARED_SECRET_SIZE)
         {
-            throw new Exception($"Invalid Kyber shared secret size: {sharedSecret.Length}");
+            throw new Exception($"Invalid ML-KEM shared secret size: {sharedSecret.Length}");
         }
         
         Console.WriteLine($"      ✓ Ciphertext generated: {kyberCiphertext.Length} bytes");
@@ -149,7 +149,7 @@ class Program
         byte[] aesEncrypted = EncryptAesGcm(plaintext, aesKey);
         Console.WriteLine($"      ✓ Encrypted payload: {aesEncrypted.Length} bytes (nonce:12 + CT + tag:16)");
         
-        // Combine into packet: [Kyber CT][AES encrypted]
+        // Combine into packet: [ML-KEM CT][AES encrypted]
         byte[] packet = new byte[kyberCiphertext.Length + aesEncrypted.Length];
         Buffer.BlockCopy(kyberCiphertext, 0, packet, 0, kyberCiphertext.Length);
         Buffer.BlockCopy(aesEncrypted, 0, packet, kyberCiphertext.Length, aesEncrypted.Length);
@@ -158,7 +158,7 @@ class Program
     }
 
     /// <summary>
-    /// Derive AES-256 key from Kyber shared secret using HKDF-SHA256.
+    /// Derive AES-256 key from ML-KEM shared secret using HKDF-SHA256.
     /// 
     /// CRITICAL: Must be IDENTICAL on all platforms (server, .NET, React Native)
     /// 
@@ -170,9 +170,9 @@ class Program
     /// </summary>
     static byte[] DeriveAesKey(byte[] sharedSecret)
     {
-        if (sharedSecret.Length != KYBER_SHARED_SECRET_SIZE)
+        if (sharedSecret.Length != ML_KEM_SHARED_SECRET_SIZE)
         {
-            throw new ArgumentException($"Shared secret must be {KYBER_SHARED_SECRET_SIZE} bytes");
+            throw new ArgumentException($"Shared secret must be {ML_KEM_SHARED_SECRET_SIZE} bytes");
         }
         
         // HKDF-SHA256 Extract phase

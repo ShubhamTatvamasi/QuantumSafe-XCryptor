@@ -10,8 +10,9 @@ DATA_DIR = "/data"
 PUBLIC_KEY_PATH = os.path.join(DATA_DIR, "kyber_public.key")
 PRIVATE_KEY_PATH = os.path.join(DATA_DIR, "kyber_private.key")
 
-# ML-KEM-1024 algorithm name (liboqs uses "Kyber1024")
-KEM_ALG = "Kyber1024"
+# ML-KEM-1024 algorithm name
+# Note: Requires liboqs 0.10.0+ which supports NIST-standardized ML-KEM naming
+KEM_ALG = "ML-KEM-1024"
 
 def generate_keypair():
     """Generate ML-KEM-1024 keypair and save to disk."""

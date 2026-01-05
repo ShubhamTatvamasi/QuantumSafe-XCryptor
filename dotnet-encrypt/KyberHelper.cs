@@ -1,9 +1,9 @@
 /*
- * Kyber1024 Post-Quantum Key Encapsulation Mechanism Helper
+ * ML-KEM-1024 Post-Quantum Key Encapsulation Mechanism Helper
  * 
- * Provides utility methods for Kyber1024 operations including key generation,
+ * Provides utility methods for ML-KEM-1024 operations including key generation,
  * encapsulation, and decapsulation for post-quantum secure key exchange.
- * Uses Open Quantum Safe liboqs 0.15.0 via native C shim and P/Invoke interop.
+ * Uses Open Quantum Safe liboqs 0.10.0+ via native C shim and P/Invoke interop.
  */
 
 using System;
@@ -12,7 +12,7 @@ using System.Security.Cryptography;
 public static class KyberHelper
 {
     /// <summary>
-    /// Generates a Kyber1024 keypair for post-quantum key encapsulation.
+    /// Generates a ML-KEM-1024 keypair for post-quantum key encapsulation.
     /// </summary>
     /// <returns>Tuple containing (PublicKey, PrivateKey) as byte arrays</returns>
     public static (byte[] PublicKey, byte[] PrivateKey) GenerateKeyPair()
@@ -25,7 +25,7 @@ public static class KyberHelper
     /// Encapsulates a shared secret using the recipient's public key.
     /// Generates a random 32-byte shared secret suitable for AES-256.
     /// </summary>
-    /// <param name="publicKey">The recipient's Kyber1024 public key</param>
+    /// <param name="publicKey">The recipient's ML-KEM-1024 public key</param>
     /// <returns>Tuple containing (Ciphertext, SharedSecret) where SharedSecret is 32 bytes for AES-256</returns>
     public static (byte[] Ciphertext, byte[] SharedSecret) Encapsulate(byte[] publicKey)
     {
@@ -36,7 +36,7 @@ public static class KyberHelper
     /// <summary>
     /// Decapsulates a shared secret using the private key and ciphertext.
     /// </summary>
-    /// <param name="privateKey">The recipient's Kyber1024 private key</param>
+    /// <param name="privateKey">The recipient's ML-KEM-1024 private key</param>
     /// <param name="ciphertext">The encapsulated ciphertext from the sender</param>
     /// <returns>The 32-byte shared secret suitable for AES-256</returns>
     public static byte[] Decapsulate(byte[] privateKey, byte[] ciphertext)

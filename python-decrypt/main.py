@@ -16,9 +16,10 @@ ENCRYPTED_PACKET_PATH = os.path.join(DATA_DIR, "encrypted-dotnet.bin")
 OUTPUT_PATH = os.path.join(DATA_DIR, "decrypted-python.txt")
 
 # ML-KEM-1024 constants
-KEM_ALG = "Kyber1024"
-KYBER_CIPHERTEXT_SIZE = 1568
-KYBER_SHARED_SECRET_SIZE = 32
+# Note: Requires liboqs 0.10.0+ which supports NIST-standardized ML-KEM naming
+KEM_ALG = "ML-KEM-1024"
+ML_KEM_CIPHERTEXT_SIZE = 1568
+ML_KEM_SHARED_SECRET_SIZE = 32
 
 # HKDF parameters (MUST match .NET)
 HKDF_SALT = b'\x00' * 32
@@ -35,7 +36,7 @@ def wait_for_file(path: str, timeout: int = 30) -> None:
 
 def derive_aes_key(shared_secret: bytes) -> bytes:
     """
-    Derive AES-256 key from Kyber shared secret using HKDF-SHA256.
+    Derive AES-256 key from ML-KEM shared secret using HKDF-SHA256.
     
     CRITICAL: Must be IDENTICAL to .NET implementation.
     
@@ -45,8 +46,8 @@ def derive_aes_key(shared_secret: bytes) -> bytes:
     - Hash: SHA-256
     - Output: 32 bytes
     """
-    if len(shared_secret) != KYBER_SHARED_SECRET_SIZE:
-        raise ValueError(f"Shared secret must be {KYBER_SHARED_SECRET_SIZE} bytes")
+    if len(shared_secret) != ML_KEM_SHARED_SECRET_SIZE:
+        raise ValueError(f"Shared secret must be {ML_KEM_SHARED_SECRET_SIZE} bytes")
     
     # HKDF Extract phase
     h = hmac.HMAC(HKDF_SALT, hashes.SHA256())
@@ -82,6 +83,16 @@ def decrypt_packet():
         private_key = f.read()
     print(f"✓ Private key loaded: {len(private_key)} bytes from {PRIVATE_KEY_PATH}\n")
     
+    # Wait for ciphertext
+    print(f"⏳ Waiting for ML-KEM ciphertext: {CIPHERTEXT_PATH}")
+    wait_for_file(CIPHERTEXT_PATH, 30)
+    with open(CIPHERTEXT_PATH, "rb") as f:
+        kyber_ciphertext = f.read()
+    print(f"✓ ML-KEM ciphertext loaded: {len(kyber_ciphertext)} bytes from {CIPHERTEXT_PATH}\n")
+    
+    if len(kyber_ciphertext) != ML_KEM_CIPHERTEXT_SIZE:
+        raise ValueError(f"Invalid ciphertext size: {len(kyber_ciphertext)} bytes (expected {ML_KEM_CIPHERTEXT_SIZE})")
+    
     # Wait for encrypted packet
     print(f"⏳ Waiting for encrypted packet: {ENCRYPTED_PACKET_PATH}")
     wait_for_file(ENCRYPTED_PACKET_PATH, 30)
@@ -89,20 +100,19 @@ def decrypt_packet():
         packet = f.read()
     print(f"✓ Encrypted packet loaded: {len(packet)} bytes from {ENCRYPTED_PACKET_PATH}\n")
     
-    if len(packet) < KYBER_CIPHERTEXT_SIZE + 12 + 16:
+    if len(packet) < ML_KEM_CIPHERTEXT_SIZE + 12 + 16:
         raise ValueError(f"Packet too short: {len(packet)} bytes")
     
-    # Extract components
-    kyber_ciphertext = packet[:KYBER_CIPHERTEXT_SIZE]
-    aes_payload = packet[KYBER_CIPHERTEXT_SIZE:]
+    # Extract AES payload from packet
+    aes_payload = packet[ML_KEM_CIPHERTEXT_SIZE:]
     
     print(f"📦 Packet structure:")
-    print(f"   • Kyber ciphertext: {len(kyber_ciphertext)} bytes")
-    print(f"   • AES payload: {len(aes_payload)} bytes\n")
+    print(f"   • ML-KEM ciphertext: {len(kyber_ciphertext)} bytes (from {CIPHERTEXT_PATH})")
+    print(f"   • AES payload: {len(aes_payload)} bytes (from {ENCRYPTED_PACKET_PATH})\n")
     
     # Decapsulate
     print(f"🔐 [1/3] Decapsulating with private key: {PRIVATE_KEY_PATH}")
-    print(f"        Using ciphertext from: {ENCRYPTED_PACKET_PATH} (first {KYBER_CIPHERTEXT_SIZE} bytes)")
+    print(f"        Using ciphertext from: {CIPHERTEXT_PATH}")
     with oqs.KeyEncapsulation(KEM_ALG, secret_key=private_key) as kem:
         shared_secret = kem.decap_secret(kyber_ciphertext)
     print(f"        ✓ Shared secret recovered: {len(shared_secret)} bytes\n")
