@@ -82,6 +82,16 @@ def decrypt_packet():
         private_key = f.read()
     print(f"✓ Private key loaded: {len(private_key)} bytes from {PRIVATE_KEY_PATH}\n")
     
+    # Wait for ciphertext
+    print(f"⏳ Waiting for Kyber ciphertext: {CIPHERTEXT_PATH}")
+    wait_for_file(CIPHERTEXT_PATH, 30)
+    with open(CIPHERTEXT_PATH, "rb") as f:
+        kyber_ciphertext = f.read()
+    print(f"✓ Kyber ciphertext loaded: {len(kyber_ciphertext)} bytes from {CIPHERTEXT_PATH}\n")
+    
+    if len(kyber_ciphertext) != KYBER_CIPHERTEXT_SIZE:
+        raise ValueError(f"Invalid ciphertext size: {len(kyber_ciphertext)} bytes (expected {KYBER_CIPHERTEXT_SIZE})")
+    
     # Wait for encrypted packet
     print(f"⏳ Waiting for encrypted packet: {ENCRYPTED_PACKET_PATH}")
     wait_for_file(ENCRYPTED_PACKET_PATH, 30)
@@ -92,8 +102,7 @@ def decrypt_packet():
     if len(packet) < KYBER_CIPHERTEXT_SIZE + 12 + 16:
         raise ValueError(f"Packet too short: {len(packet)} bytes")
     
-    # Extract components
-    kyber_ciphertext = packet[:KYBER_CIPHERTEXT_SIZE]
+    # Extract AES payload from packet
     aes_payload = packet[KYBER_CIPHERTEXT_SIZE:]
     
     print(f"📦 Packet structure:")
@@ -102,7 +111,7 @@ def decrypt_packet():
     
     # Decapsulate
     print(f"🔐 [1/3] Decapsulating with private key: {PRIVATE_KEY_PATH}")
-    print(f"        Using ciphertext from: {ENCRYPTED_PACKET_PATH} (first {KYBER_CIPHERTEXT_SIZE} bytes)")
+    print(f"        Using ciphertext from: {CIPHERTEXT_PATH}")
     with oqs.KeyEncapsulation(KEM_ALG, secret_key=private_key) as kem:
         shared_secret = kem.decap_secret(kyber_ciphertext)
     print(f"        ✓ Shared secret recovered: {len(shared_secret)} bytes\n")
